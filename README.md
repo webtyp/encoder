@@ -1,7 +1,9 @@
-# transformer
+# encoder
 <img src="docs/img/badges.svg">
 
-Grafo del encoder transformer y kernels CPU/WASM: ids de tokens entran, un vector sale.
+Grafo del encoder (arquitectura transformer) en Go para CPU/WASM: ids de tokens entran, un vector sale.
+Antes se llamaba `webtyp/transformer`; las operaciones sin estado que usa (matmul, normas,
+activaciones, softmax, RoPE) están en [`webtyp/nn`](https://github.com/webtyp/nn).
 
 Implementa el forward pass real de `ModernBertModel` con `Config` ajustable por modelo —
 mismo grafo, mismos kernels, dos modelos verificados: `ibm-granite/granite-embedding-97m-multilingual-r2`
@@ -50,8 +52,8 @@ el piso es un número creíble, no un benchmark roto. Sigue en la banda "viable 
 reservas" de la etapa 1 y requiere la misma decisión humana sobre latencia.
 
 Nota: `tinygo build -target wasm -o /dev/null .` no aplica a este repo porque es
-un paquete biblioteca (`package transformer`, sin `main`); falla con
-`expected main package to have name "main", not "transformer"` tanto antes como
+un paquete biblioteca (`package encoder`, sin `main`); falla con
+`expected main package to have name "main", not "encoder"` tanto antes como
 después de esta etapa. La compilación wasm real se verifica con
 `GOOS=js GOARCH=wasm go build ./...` y `tinygo test -target wasm .`, que pasan.
 

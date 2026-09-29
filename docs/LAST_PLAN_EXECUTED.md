@@ -1,59 +1,89 @@
 ---
-PLAN: "fix: webtyp/transformer — Config.Activation, GatedFFN hardcoded SiLU regardless of model"
-TAG: v0.1.4
+PLAN: "refactor!: transformer becomes encoder (module webtyp.com/encoder, package encoder) and uses webtyp.com/nn"
+TAG: v0.2.0
+EXECUTOR: jules
+REVIEWER: none
 ---
 
 > This plan is dispatched via the CodeJob workflow. See skill: agents-workflow.
-> Índice maestro: https://github.com/webtyp/agent/blob/main/docs/MASTER_PLAN.md
+>
+> Part of
+> [`AGENT_ECOSYSTEM_MASTER_PLAN.md`](https://github.com/webtyp/agent/blob/main/docs/AGENT_ECOSYSTEM_MASTER_PLAN.md).
+> **Blocked until `webtyp.com/nn` v0.1.0 is published.** `webtyp/bekko` waits for this tag.
 
-# Plan — `webtyp/transformer`, `Config.Activation` (bug real, encontrado comparando contra el modelo real)
+# Plan — `webtyp/transformer` is renamed `webtyp/encoder`
 
-## El bug, y cómo se encontró
+## 0. Context
 
-`GatedFFN` llamaba `SiLU(first)` sin condición — asumido correcto para
-`granite-embedding-97m-multilingual-r2` en la etapa 2/3 (su `TestEncode_MatchesReference`,
-coseno 1.0 contra el modelo real, lo confirma en los hechos), **pero incorrecto para
-`bekko-embedding-v1-a8m`**, cuyo `config.json` real dice `"hidden_activation": "gelu"` —
-verificado leyendo el archivo ahora, no de memoria.
+This repository computes the **encoder** of an embedding model (ModernBERT: token ids in, one
+vector out). It was called `transformer`, a name that promises every transformer, including
+the decoder that generates text. That decoder is now being built in its own repository,
+`webtyp/decoder`. With both next to each other, "transformer" would be ambiguous. The GitHub
+repository has already been renamed to `webtyp/encoder`. This plan renames the Go module and
+package to match.
 
-**Cómo se encontró:** `webtyp/embed`'s `TestStaticEmbedder_MatchesReference` (docs/PLAN.md
-Cambio 5 de ese repo) comparó la salida real de `StaticEmbedder` contra vectores de
-referencia generados corriendo el modelo real
-(`AutoModel.from_pretrained("hotchpotch/bekko-embedding-v1-a8m")`, `transformers`+`torch`
-CPU) — coseno ~0.91–0.92 en las tres oraciones de prueba, consistente pero claramente mal (no
-es ruido de cuantización int8, que da >0.999 típicamente). La lista de sospechosos que el
-plan de `embed` ya tenía escrita (transposición de pesos, indexado de capa 0, tokenizer)
-todos descartados por inspección — la config real de Bekko señaló la activación como la
-causa antes de necesitar más diagnóstico.
+The stateless operations (`MatmulT`, `LayerNorm`, `RMSNorm`, `Softmax`, `GELU`, `SiLU`, `Add`,
+`RoPE`) were copied, unchanged, to `webtyp.com/nn` v0.1.0 so the decoder and the speech models
+can share them. This plan deletes the copy here and calls `nn`.
 
-## El fix
+## Development rules (inline)
 
-`Config` gana un campo `Activation Activation`, con `ActivationSiLU` como valor cero
-(preserva el comportamiento de Granite sin tocar ningún caller existente) y
-`ActivationGELU` (exacta, basada en `erf` — la que ya existía en `kernels.go` como `GELU`,
-sin usar hasta ahora). `GatedFFN` gana un parámetro `act Activation` y rama entre
-`SiLU`/`GELU` según ese valor; `Encode` pasa `cfg.Activation` en su única llamada a
-`GatedFFN`.
+- Primary runtime: browser, TinyGo/WASM. Every file compiles under `GOOS=js GOARCH=wasm` and TinyGo.
+- **Behaviour must not change.** The encoder was verified to cosine ≥ 0.999 against the real
+  `bekko-embedding-v1-a8m`. This plan only renames and re-imports.
+- **Never import:** `fmt`, `errors`, `strings`, `strconv` (use `webtyp.com/fmt`), `context`,
+  `encoding/json`, `sort`, `map[K]V`, `os`, `log`. `math` is allowed.
+- Plain Go, one implementation: no SIMD, no build tags.
+- Tests: `testing` + `math` only. Do **not** run `gopush`/`codejob`.
 
-**Test nuevo, `TestGatedFFN_ActivationSelectsRealFunction`**: corre `GatedFFN` con
-`ActivationSiLU` y con `ActivationGELU` sobre el mismo input y falla si el resultado es
-idéntico — exactamente la regresión que este bug fue (un parámetro que existe pero no se usa).
+## Design gate (api-design — five answers)
 
-## Qué NO cambia
+1. **Prior art.** **Hugging Face `transformers`** separates `*Encoder` and `*Decoder` classes
+   (`BertEncoder`, `T5Stack` as encoder or decoder). **ONNX exports** of seq2seq models ship
+   `encoder_model.onnx` and `decoder_model.onnx`. **whisper.cpp** has `whisper_encode` and
+   `whisper_decode`. They all name the half, not the architecture family.
+2. **Novice-name test.** `encoder.Encode(cfg, w, tokenEmbeds, seqLen)` reads as "encode these
+   tokens". `transformer.Encode` next to a future `decoder.Generate` would leave a reader
+   asking whether "transformer" also decodes.
+3. **Complexity ledger.**
+   ```
+   Concepts the developer must learn   +0 / −0
+   Files they must touch to do X       +0 / −1   (kernels.go gone)
+   Lines at the call site              +0 / −0   (import path and package name)
+   Ways to do the same thing           +0 / −1   (the 8 operations exist only in nn)
+   ```
+4. **Where it belongs.** The encoder graph (`Config`, `Weights`, `Encode`, `GatedFFN`,
+   `Activation`, pooling) stays here. The stateless operations live in `nn`.
+5. **What it deletes.** `kernels.go`, `kernels_test.go`, the module path
+   `webtyp.com/transformer` and the package name `transformer`.
 
-`granite-embedding-97m-multilingual-r2` sigue sin especificar `Activation` en su `Config` —
-zero value, `ActivationSiLU`, mismo comportamiento de siempre. `TestEncode_MatchesReference`
-(el fixture real de Granite) sigue en coseno 1.0 después de este cambio — verificado, no
-asumido.
+## Stage 1 — module and package
 
-## Build que define "done"
+- `go.mod`: `module webtyp.com/encoder`. `go get webtyp.com/nn@v0.1.0`.
+- Every `package transformer` → `package encoder` (including test files).
+- Every error prefix `"transformer: …"` → `"encoder: …"`. The rest of each message is unchanged.
 
-```bash
-go vet ./...
-gotest
-GOOS=js GOARCH=wasm go build ./...
-tinygo test -target wasm .
-```
+## Stage 2 — use nn
 
-Los cuatro en verde. Cadena completa verificada además end-to-end en `webtyp/embed`: con este
-fix, `TestStaticEmbedder_MatchesReference` pasa contra el modelo real (ver ese repo).
+- Delete `kernels.go` and `kernels_test.go`. Their tests now live in `webtyp/nn`.
+- In `encode.go`, import `webtyp.com/nn` and call `nn.MatmulT`, `nn.LayerNorm`, `nn.RoPE`,
+  `nn.Softmax`, `nn.GELU`, `nn.SiLU` (and `nn.RMSNorm` / `nn.Add` if used). Update the comment
+  on `GatedFFN` ("the SiLU/GELU kernels in kernels.go" → "the SiLU/GELU operations of
+  webtyp.com/nn").
+- `webtyp.com/vector` stays a dependency only if something other than the deleted `MatmulT`
+  still uses it. Otherwise `go mod tidy` removes it.
+
+## Stage 3 — docs
+
+- `README.md`, `AGENTS.md`: title and every `transformer` reference → `encoder`. Add one sentence:
+  "Formerly `webtyp/transformer`; the stateless operations it used are in `webtyp/nn`."
+- `docs/LAST_PLAN_EXECUTED.md` is history: do not edit it.
+
+## Stages
+
+| Stage | Files | Acceptance |
+|---|---|---|
+| 1 | `go.mod`, all `.go` files | `grep -rn "package transformer\|\"transformer:" --include=*.go .` → empty |
+| 2 | `encode.go`; `kernels.go`, `kernels_test.go` deleted | `test ! -e kernels.go`; `grep -n "nn\." encode.go` finds the calls |
+| 3 | `README.md`, `AGENTS.md` | `grep -n "transformer" README.md AGENTS.md` only finds the "Formerly" sentence |
+| all | — | `gotest` and `gotest -tinygo` pass; `BenchmarkEncode_20x12x384` still runs |

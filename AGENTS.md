@@ -1,17 +1,19 @@
-# Agent Guide — `webtyp/transformer`
+# Agent Guide — `webtyp/encoder`
+
+> Formerly `webtyp/transformer`; the stateless operations it used are in `webtyp/nn`.
 
 Constraints for agents working on this library. **Read this before any change.**
 The current work order is [docs/PLAN.md](docs/PLAN.md); the master index is
-[`agent/docs/MASTER_PLAN.md`](https://github.com/webtyp/agent/blob/main/docs/MASTER_PLAN.md).
+[`retrieval/docs/SEMANTIC_SEARCH_MASTER_PLAN.md`](https://github.com/webtyp/retrieval/blob/main/docs/SEMANTIC_SEARCH_MASTER_PLAN.md).
 
 ---
 
 ## What this library is
 
-Token ids and weights in; **one vector out**. It owns the encoder graph and the numeric kernels that
-run it — nothing else. Not tokenization (`webtyp/tokenizer`), not the weight format
-(`webtyp/weights`), not the `Embedder` port (`webtyp/embed`, which composes all three), and not
-output normalization (that is `embed`'s promise to keep).
+Token ids and weights in; **one vector out**. It owns the encoder graph and nothing else. Not the
+numeric operations (`webtyp/nn`), not tokenization (`webtyp/tokenizer`), not the weight format
+(`webtyp/weights`), not a model adapter (`webtyp/bekko` composes all of them into an
+`embed.Embedder`), and not output normalization (the adapter's promise to keep).
 
 Its **primary runtime is a browser tab compiled with TinyGo**. The host is a development
 convenience. A change that is green on the host and red under TinyGo is **not done**.
@@ -90,7 +92,6 @@ Tests use the standard library only, with no external assertion packages.
 
 ## Common mistakes to avoid
 
-- Writing the encoder graph before its stage is dispatched. Stage 1 is kernels plus the cost-model
-  benchmark; finishing those means you are finished.
 - Benchmarking with `gotest -bench` and recording a native number.
-- Reaching for SIMD or build tags. Plain Go, one implementation, all targets.
+- Reaching for SIMD or build tags. Plain Go, one implementation, all targets. Speed-ups belong in
+  `webtyp/nn` and in how the binary is compiled; see `nn/docs/SIMD.md`.

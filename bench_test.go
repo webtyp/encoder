@@ -1,4 +1,4 @@
-package transformer
+package encoder
 
 import (
 	"math/rand"

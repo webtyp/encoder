@@ -1,7 +1,8 @@
-package transformer
+package encoder
 
 import (
 	"math"
+	"webtyp.com/nn"
 
 	"webtyp.com/fmt"
 )
@@ -69,24 +70,24 @@ type Weights struct {
 // GatedFFN computes the gated feed-forward block: wiT projects to 2*ffnDim, splits into
 // two halves, applies act to the FIRST half and multiplies elementwise by the second half
 // (matching ModernBertMLP.forward: input, gate = Wi(x).chunk(2); Wo(act(input)*gate)), then
-// woT projects back down. Built on MatmulT and the SiLU/GELU kernels in kernels.go.
+// woT projects back down. Built on nn.MatmulT and the SiLU/GELU operations of webtyp.com/nn.
 // hidden and gated are caller-owned scratch buffers (seqLen*2*ffnDim and seqLen*ffnDim
 // respectively) — GatedFFN allocates nothing, matching every other kernel in this file.
 func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim int, act Activation) error {
 	if seqLen <= 0 || dim <= 0 || ffnDim <= 0 {
-		return fmt.Err("transformer: invalid dimensions for gatedffn")
+		return fmt.Err("encoder: invalid dimensions for gatedffn")
 	}
 	if len(src) < seqLen*dim || len(dst) < seqLen*dim {
-		return fmt.Err("transformer: buffer too short for gatedffn")
+		return fmt.Err("encoder: buffer too short for gatedffn")
 	}
 	if len(wiT) < 2*ffnDim*dim || len(woT) < dim*ffnDim {
-		return fmt.Err("transformer: weight buffer too short for gatedffn")
+		return fmt.Err("encoder: weight buffer too short for gatedffn")
 	}
 	if len(hidden) < seqLen*2*ffnDim || len(gated) < seqLen*ffnDim {
-		return fmt.Err("transformer: scratch buffer too short for gatedffn")
+		return fmt.Err("encoder: scratch buffer too short for gatedffn")
 	}
 
-	if err := MatmulT(hidden, src, wiT, seqLen, dim, 2*ffnDim); err != nil {
+	if err := nn.MatmulT(hidden, src, wiT, seqLen, dim, 2*ffnDim); err != nil {
 		return err
 	}
 
@@ -96,9 +97,9 @@ func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim i
 		gate := row[ffnDim:]
 		var actErr error
 		if act == ActivationGELU {
-			actErr = GELU(first)
+			actErr = nn.GELU(first)
 		} else {
-			actErr = SiLU(first)
+			actErr = nn.SiLU(first)
 		}
 		if actErr != nil {
 			return actErr
@@ -109,7 +110,7 @@ func GatedFFN(dst, src, wiT, woT, hidden, gated []float32, seqLen, dim, ffnDim i
 		}
 	}
 
-	return MatmulT(dst, gated, woT, seqLen, ffnDim, dim)
+	return nn.MatmulT(dst, gated, woT, seqLen, ffnDim, dim)
 }
 
 // isGlobalLayer reports whether layer li uses full attention. Layers with
@@ -127,25 +128,25 @@ func isGlobalLayer(li, globalEvery int) bool {
 // stays embed's job, same boundary as stage 1.
 func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32, error) {
 	if cfg.NumLayers <= 0 || cfg.Heads <= 0 || cfg.Dim <= 0 || cfg.FFNDim <= 0 {
-		return nil, fmt.Err("transformer: invalid config for encode")
+		return nil, fmt.Err("encoder: invalid config for encode")
 	}
 	if cfg.Dim%cfg.Heads != 0 {
-		return nil, fmt.Err("transformer: dim not divisible by heads for encode")
+		return nil, fmt.Err("encoder: dim not divisible by heads for encode")
 	}
 	if cfg.GlobalEveryNLayers <= 0 || cfg.LocalWindow < 0 {
-		return nil, fmt.Err("transformer: invalid attention config for encode")
+		return nil, fmt.Err("encoder: invalid attention config for encode")
 	}
 	if seqLen <= 0 {
-		return nil, fmt.Err("transformer: invalid seqLen for encode")
+		return nil, fmt.Err("encoder: invalid seqLen for encode")
 	}
 	if len(tokenEmbeds) < seqLen*cfg.Dim {
-		return nil, fmt.Err("transformer: tokenEmbeds too short for encode")
+		return nil, fmt.Err("encoder: tokenEmbeds too short for encode")
 	}
 	if len(w.Layers) != cfg.NumLayers {
-		return nil, fmt.Err("transformer: layer count mismatch for encode")
+		return nil, fmt.Err("encoder: layer count mismatch for encode")
 	}
 	if len(w.EmbedNormGamma) < cfg.Dim || len(w.FinalNormGamma) < cfg.Dim {
-		return nil, fmt.Err("transformer: norm weight too short for encode")
+		return nil, fmt.Err("encoder: norm weight too short for encode")
 	}
 
 	dim := cfg.Dim
@@ -155,22 +156,22 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 	for li := range w.Layers {
 		lw := &w.Layers[li]
 		if len(lw.AttnNormGamma) > 0 && len(lw.AttnNormGamma) < dim {
-			return nil, fmt.Err("transformer: attn norm too short for encode")
+			return nil, fmt.Err("encoder: attn norm too short for encode")
 		}
 		if len(lw.WqkvT) < 3*dim*dim || len(lw.WoT) < dim*dim {
-			return nil, fmt.Err("transformer: attn weight too short for encode")
+			return nil, fmt.Err("encoder: attn weight too short for encode")
 		}
 		if len(lw.MlpNormGamma) < dim {
-			return nil, fmt.Err("transformer: mlp norm too short for encode")
+			return nil, fmt.Err("encoder: mlp norm too short for encode")
 		}
 		if len(lw.WiT) < 2*ffnDim*dim || len(lw.MlpWoT) < dim*ffnDim {
-			return nil, fmt.Err("transformer: mlp weight too short for encode")
+			return nil, fmt.Err("encoder: mlp weight too short for encode")
 		}
 	}
 
 	h := make([]float32, seqLen*dim)
 	copy(h, tokenEmbeds[:seqLen*dim])
-	if err := LayerNorm(h, h, w.EmbedNormGamma, nil, dim, cfg.Eps); err != nil {
+	if err := nn.LayerNorm(h, h, w.EmbedNormGamma, nil, dim, cfg.Eps); err != nil {
 		return nil, err
 	}
 
@@ -202,18 +203,18 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 		// Attention block with pre-norm (Identity for layer 0: gamma is nil).
 		src := h
 		if len(lw.AttnNormGamma) > 0 {
-			if err := LayerNorm(attnIn, h, lw.AttnNormGamma, nil, dim, cfg.Eps); err != nil {
+			if err := nn.LayerNorm(attnIn, h, lw.AttnNormGamma, nil, dim, cfg.Eps); err != nil {
 				return nil, err
 			}
 			src = attnIn
 		}
-		if err := MatmulT(qkv, src, lw.WqkvT, seqLen, dim, 3*dim); err != nil {
+		if err := nn.MatmulT(qkv, src, lw.WqkvT, seqLen, dim, 3*dim); err != nil {
 			return nil, err
 		}
 		for pos := 0; pos < seqLen; pos++ {
 			qPos := qkv[pos*3*dim : pos*3*dim+dim]
 			kPos := qkv[pos*3*dim+dim : pos*3*dim+2*dim]
-			if err := RoPE(qPos, kPos, pos, theta, dim, heads); err != nil {
+			if err := nn.RoPE(qPos, kPos, pos, theta, dim, heads); err != nil {
 				return nil, err
 			}
 		}
@@ -226,7 +227,7 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 					vhT[k*seqLen+i] = vRow[k]
 				}
 			}
-			if err := MatmulT(scores, qh, kh, seqLen, headDim, seqLen); err != nil {
+			if err := nn.MatmulT(scores, qh, kh, seqLen, headDim, seqLen); err != nil {
 				return nil, err
 			}
 			for i := 0; i < seqLen; i++ {
@@ -237,37 +238,37 @@ func Encode(cfg Config, w Weights, tokenEmbeds []float32, seqLen int) ([]float32
 						row[j] = -1e30
 					}
 				}
-				if err := Softmax(row); err != nil {
+				if err := nn.Softmax(row); err != nil {
 					return nil, err
 				}
 			}
-			if err := MatmulT(ctxHead, scores, vhT, seqLen, seqLen, headDim); err != nil {
+			if err := nn.MatmulT(ctxHead, scores, vhT, seqLen, seqLen, headDim); err != nil {
 				return nil, err
 			}
 			for i := 0; i < seqLen; i++ {
 				copy(attnConcat[i*dim+hd*headDim:i*dim+(hd+1)*headDim], ctxHead[i*headDim:(i+1)*headDim])
 			}
 		}
-		if err := MatmulT(attnOut, attnConcat, lw.WoT, seqLen, dim, dim); err != nil {
+		if err := nn.MatmulT(attnOut, attnConcat, lw.WoT, seqLen, dim, dim); err != nil {
 			return nil, err
 		}
-		if err := Add(h, attnOut); err != nil {
+		if err := nn.Add(h, attnOut); err != nil {
 			return nil, err
 		}
 
 		// MLP block with pre-norm.
-		if err := LayerNorm(mlpIn, h, lw.MlpNormGamma, nil, dim, cfg.Eps); err != nil {
+		if err := nn.LayerNorm(mlpIn, h, lw.MlpNormGamma, nil, dim, cfg.Eps); err != nil {
 			return nil, err
 		}
 		if err := GatedFFN(mlpOut, mlpIn, lw.WiT, lw.MlpWoT, ffnHidden, ffnGated, seqLen, dim, ffnDim, cfg.Activation); err != nil {
 			return nil, err
 		}
-		if err := Add(h, mlpOut); err != nil {
+		if err := nn.Add(h, mlpOut); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := LayerNorm(h, h, w.FinalNormGamma, nil, dim, cfg.Eps); err != nil {
+	if err := nn.LayerNorm(h, h, w.FinalNormGamma, nil, dim, cfg.Eps); err != nil {
 		return nil, err
 	}
 
