@@ -3,7 +3,7 @@ module webtyp.com/encoder
 go 1.26.8
 
 require (
-	webtyp.com/fmt v1.0.1
+	webtyp.com/fmt v1.0.2
 	webtyp.com/nn v0.5.0
 )
 
